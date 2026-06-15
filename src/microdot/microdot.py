@@ -1194,6 +1194,206 @@ class Microdot:
             subapp.error_handlers = {}
 
     @staticmethod
+    def _route_params(url_pattern):
+        """Return the dynamic parameters declared in a URL pattern.
+
+        Each parameter is described by a dictionary with its ``name`` and
+        ``type``. Parameters that use a regular expression type also include
+        the regular expression in a ``pattern`` key. The URL pattern string is
+        parsed directly, so this helper does not have any side effects on the
+        :class:`URLPattern <microdot.URLPattern>` object.
+        """
+        params = []
+        for segment in url_pattern.lstrip('/').split('/'):
+            if segment and segment[0] == '<' and segment[-1] == '>':
+                spec = segment[1:-1]
+                if ':' in spec:
+                    type_, name = spec.rsplit(':', 1)
+                else:
+                    type_, name = 'string', spec
+                if type_.startswith('re:'):
+                    params.append({'name': name, 'type': 're',
+                                   'pattern': type_[3:]})
+                else:
+                    params.append({'name': name, 'type': type_})
+        return params
+
+    @staticmethod
+    def _effective_pattern(url_pattern):
+        """Return a normalized key for a URL pattern.
+
+        Dynamic segments are reduced to their type, so that two patterns that
+        match exactly the same set of paths produce the same key (for example
+        ``/users/<id>`` and ``/users/<name>`` both normalize to
+        ``/users/<string>``). This is used to detect routes that shadow each
+        other.
+        """
+        parts = []
+        for segment in url_pattern.lstrip('/').split('/'):
+            if segment and segment[0] == '<' and segment[-1] == '>':
+                spec = segment[1:-1]
+                type_ = spec.rsplit(':', 1)[0] if ':' in spec else 'string'
+                parts.append('<' + type_ + '>')
+            else:
+                parts.append(segment)
+        return '/'.join(parts)
+
+    def list_routes(self):
+        """Return a list with information about all the registered routes.
+
+        Each route is described by a dictionary with the following keys:
+
+        - ``path``: the full URL pattern, including the prefix of the
+          sub-application the route was mounted under, if any.
+        - ``methods``: the sorted list of HTTP methods the route handles.
+        - ``handler``: the name of the function that handles the route.
+        - ``dynamic``: ``True`` if the path has dynamic components.
+        - ``params``: the list of dynamic parameters, each given as a
+          dictionary with ``name`` and ``type`` keys (plus ``pattern`` for
+          regular expression parameters).
+        - ``url_prefix``: the prefix the route was mounted under, or an empty
+          string.
+        - ``mounted``: ``True`` if the route comes from a mounted
+          sub-application.
+
+        The returned data does not depend on any particular output format, so
+        it can be used to print a routing table, to write assertions in tests,
+        or to generate documentation.
+
+        Example::
+
+            for route in app.list_routes():
+                print(route['methods'], route['path'])
+        """
+        routes = []
+        for methods, pattern, handler, url_prefix, subapp in self.url_map:
+            url_pattern = pattern.url_pattern
+            params = self._route_params(url_pattern)
+            name = getattr(handler, '__name__', None)
+            if name is None:  # pragma: no cover
+                name = repr(handler)
+            routes.append({
+                'path': url_pattern,
+                'methods': sorted(methods),
+                'handler': name,
+                'dynamic': len(params) > 0,
+                'params': params,
+                'url_prefix': url_prefix,
+                'mounted': subapp is not None,
+            })
+        return routes
+
+    def check_routes(self):
+        """Return a list of warnings about suspicious route configurations.
+
+        This method inspects the registered routes and reports configurations
+        that are likely to be mistakes, so that they can be caught during
+        development instead of in production. Each warning is a dictionary with
+        a ``path``, the affected ``methods`` and a human readable ``message``.
+
+        The checks currently performed are:
+
+        - Shadowed routes: a route that can never be reached because an earlier
+          route handles the same path and HTTP method.
+        - Duplicate methods: an HTTP method that is listed more than once in
+          the same route.
+
+        Example::
+
+            for warning in app.check_routes():
+                print(warning['message'])
+        """
+        warnings = []
+        seen = {}
+        for methods, pattern, handler, url_prefix, subapp in self.url_map:
+            path = pattern.url_pattern
+
+            # report any method that is declared more than once on this route
+            unique_methods = []
+            duplicates = []
+            for method in methods:
+                if method in unique_methods:
+                    if method not in duplicates:
+                        duplicates.append(method)
+                else:
+                    unique_methods.append(method)
+            if duplicates:
+                warnings.append({
+                    'path': path,
+                    'methods': sorted(duplicates),
+                    'message': 'route {path} declares duplicate methods '
+                               '{methods}'.format(
+                                   path=path, methods=sorted(duplicates)),
+                })
+
+            # report routes that are shadowed by an earlier identical pattern
+            key = self._effective_pattern(path)
+            if key in seen:
+                overlap = sorted(set(unique_methods) & set(seen[key]))
+                if overlap:
+                    warnings.append({
+                        'path': path,
+                        'methods': overlap,
+                        'message': 'route {path} for method(s) '
+                                   '{methods} is shadowed by an '
+                                   'earlier route with the same '
+                                   'path'.format(
+                                       path=path, methods=overlap),
+                    })
+                seen[key] = sorted(set(seen[key]) | set(unique_methods))
+            else:
+                seen[key] = unique_methods
+        return warnings
+
+    def print_routes(self):
+        """Print a table with all the registered routes and return it.
+
+        This is a convenience method intended for interactive debugging. The
+        table is built from :meth:`list_routes`, and the formatted string is
+        also returned so it can be logged or inspected. Routes that come from a
+        mounted sub-application are tagged with ``[mounted]``, and routes with
+        dynamic path components are tagged with ``[dynamic]``.
+
+        Example::
+
+            >>> app.print_routes()
+            METHOD     PATH               HANDLER
+            ---------------------------------------
+            GET        /                  index
+            GET,POST   /users/<int:id>    user  [dynamic]
+        """
+        routes = self.list_routes()
+        if not routes:
+            text = '(no routes registered)'
+            print(text)
+            return text
+
+        def pad(value, width):
+            return value + ' ' * (width - len(value))
+
+        method_strs = [','.join(route['methods']) for route in routes]
+        method_width = max([len('METHOD')] + [len(m) for m in method_strs])
+        path_width = max([len('PATH')] + [len(r['path']) for r in routes])
+
+        header = '{method}  {path}  {handler}'.format(
+            method=pad('METHOD', method_width),
+            path=pad('PATH', path_width), handler='HANDLER')
+        lines = [header, '-' * len(header)]
+        for route, method_str in zip(routes, method_strs):
+            tags = ''
+            if route['mounted']:
+                tags += '  [mounted]'
+            if route['dynamic']:
+                tags += '  [dynamic]'
+            lines.append('{method}  {path}  {handler}{tags}'.format(
+                method=pad(method_str, method_width),
+                path=pad(route['path'], path_width),
+                handler=route['handler'], tags=tags))
+        text = '\n'.join(lines)
+        print(text)
+        return text
+
+    @staticmethod
     def abort(status_code, reason=None):
         """Abort the current request and return an error response with the
         given status code.

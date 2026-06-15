@@ -358,6 +358,67 @@ that defaults to ``False``. When this argument is set to ``True``, the
 before-request, after-request and error handlers defined in the sub-application
 will only apply to the sub-application.
 
+Inspecting the Registered Routes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+As an application grows and accumulates routes, before- and after-request
+handlers and mounted sub-applications, it can become difficult to keep track of
+exactly which endpoints are installed. Microdot provides a few methods that
+report this information, so that it does not have to be obtained by inspecting
+internal attributes.
+
+The :func:`print_routes() <microdot.Microdot.print_routes>` method prints a
+table with all the registered routes, which is handy when debugging from the
+command line or a REPL::
+
+    >>> app.print_routes()
+    METHOD      PATH             HANDLER
+    -----------------------------------------
+    GET         /                index
+    DELETE,GET  /users/<int:id>  get_user  [dynamic]
+
+Routes that have dynamic path components are tagged with ``[dynamic]``, and
+routes that come from a mounted sub-application are tagged with ``[mounted]``.
+The formatted table is also returned as a string, so it can be logged.
+
+To work with the route information programmatically, the
+:func:`list_routes() <microdot.Microdot.list_routes>` method returns a list of
+dictionaries, one per route. Because the returned data is not tied to any
+output format, it is convenient for writing tests, building a custom debug page
+or generating documentation::
+
+    >>> app.list_routes()
+    [{'path': '/', 'methods': ['GET'], 'handler': 'index', 'dynamic': False,
+      'params': [], 'url_prefix': '', 'mounted': False},
+     {'path': '/users/<int:id>', 'methods': ['DELETE', 'GET'],
+      'handler': 'get_user', 'dynamic': True,
+      'params': [{'name': 'id', 'type': 'int'}], 'url_prefix': '',
+      'mounted': False}]
+
+For routes that originate from a mounted sub-application, the ``path`` includes
+the full URL prefix, ``mounted`` is ``True`` and ``url_prefix`` reports the
+prefix the sub-application was mounted under, so nested routes can be
+interpreted without ambiguity.
+
+Finally, the :func:`check_routes() <microdot.Microdot.check_routes>` method
+inspects the routing table and returns a list of warnings about configurations
+that are likely to be mistakes, such as a route that is shadowed by an earlier
+route handling the same path and method. Each warning is a dictionary with the
+affected ``path``, ``methods`` and a human readable ``message``::
+
+    @app.get('/users/<id>')
+    async def get_user(request, id):
+        ...
+
+    @app.get('/users/<name>')  # shadowed: never reached
+    async def get_user_by_name(request, name):
+        ...
+
+    >>> app.check_routes()
+    [{'path': '/users/<name>', 'methods': ['GET'],
+      'message': 'route /users/<name> for method(s) [\'GET\'] is shadowed by '
+                 'an earlier route with the same path'}]
+
 Shutting Down the Server
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
