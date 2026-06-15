@@ -11,6 +11,7 @@ the same source code repository.
    multipart
    websocket
    sse
+   pubsub
    templates
    sessions
    auth

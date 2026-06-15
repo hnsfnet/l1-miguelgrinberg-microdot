@@ -8,6 +8,7 @@ API Reference
    multipart
    websocket
    sse
+   pubsub
    utemplate
    jinja
    sessions

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Microdot Pub/Sub Example</title>
+    <meta charset="UTF-8">
+  </head>
+  <body>
+    <h1>Microdot Pub/Sub Example</h1>
+    <p>
+      Type a message and send it. It is published to the <code>chat</code>
+      channel and broadcast to every connected client. Open this page in a
+      second browser tab to see the broadcast in action.
+    </p>
+    <form id="form">
+      <input id="message" autocomplete="off" placeholder="Type a message">
+      <button type="submit">Send</button>
+    </form>
+
+    <h2>Received over WebSocket</h2>
+    <div id="ws-log"></div>
+
+    <h2>Received over SSE</h2>
+    <div id="sse-log"></div>
+
+    <script>
+      const log = (id, text) => {
+        document.getElementById(id).innerHTML += `${text}<br>`;
+      };
+
+      // receive broadcasts over a WebSocket, and use the same socket to publish
+      const socket = new WebSocket(`ws://${location.host}/ws`);
+      socket.onmessage = (event) => log('ws-log', event.data);
+
+      // receive the same broadcasts over Server-Sent Events
+      const eventSource = new EventSource('/events');
+      eventSource.onmessage = (event) => log('sse-log', event.data);
+
+      document.getElementById('form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        const input = document.getElementById('message');
+        if (input.value) {
+          socket.send(input.value);
+          input.value = '';
+        }
+      });
+    </script>
+  </body>
+</html>

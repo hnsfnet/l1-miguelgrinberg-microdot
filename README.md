@@ -45,7 +45,7 @@ MicroPython and CPython:
 - Support for forms encoded in `multipart/form-data` format (**Added in version 2.2**)
 - CSRF protection extension (**Added in version 2.5**)
 - Type hints (**Added in version 2.6**)
-- Pub/sub mini-framework for WebSocket and SSE
+- Pub/sub mini-framework for WebSocket and SSE (**Added in version 2.7**)
 - OpenAPI integration, similar to [APIFairy](https://github.com/miguelgrinberg/apifairy) for Flask
 
 Do you have other ideas to propose? Let's [discuss them](https://github.com/:miguelgrinberg/microdot/discussions/new?category=ideas)!
