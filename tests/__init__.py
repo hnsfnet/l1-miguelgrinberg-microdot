@@ -13,3 +13,4 @@ from tests.test_session import *  # noqa: F401, F403
 from tests.test_auth import *  # noqa: F401, F403
 from tests.test_login import *  # noqa: F401, F403
 from tests.test_csrf import *  # noqa: F401, F403
+from tests.test_openapi import *  # noqa: F401, F403

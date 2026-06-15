@@ -15,6 +15,7 @@ API Reference
    login
    cors
    csrf
+   openapi
    test_client
    asgi
    wsgi

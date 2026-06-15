@@ -17,5 +17,6 @@ the same source code repository.
    login
    cors
    csrf
+   openapi
    test_client
    production
