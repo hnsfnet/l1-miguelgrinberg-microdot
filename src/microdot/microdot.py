@@ -354,6 +354,15 @@ class Request:
         self.cookies = {}
         #: The parsed ``Content-Length`` header.
         self.content_length = 0
+        #: Set to ``True`` when the request includes a header that could not
+        #: be parsed and prevents the request from being handled, such as an
+        #: invalid or negative ``Content-Length``. Requests flagged this way
+        #: are rejected with a 400 status code.
+        self.invalid_headers = False
+        #: Set to ``True`` when the client disconnected before sending the
+        #: complete request body. Requests flagged this way are rejected with
+        #: a 400 status code.
+        self.body_incomplete = False
         #: The parsed ``Content-Type`` header.
         self.content_type = None
         #: A general purpose container for applications to store data during
@@ -366,7 +375,14 @@ class Request:
             self.args = self._parse_urlencoded(self.query_string)
 
         if 'Content-Length' in self.headers:
-            self.content_length = int(self.headers['Content-Length'])
+            content_length = self._parse_content_length(
+                self.headers['Content-Length'])
+            if content_length is None:
+                # the Content-Length header is present but could not be parsed
+                # as a non-negative integer
+                self.invalid_headers = True
+            else:
+                self.content_length = content_length
         if 'Content-Type' in self.headers:
             self.content_type = self.headers['Content-Type']
         if 'Cookie' in self.headers:
@@ -408,7 +424,6 @@ class Request:
 
         # headers
         headers = NoCaseDict()
-        content_length = 0
         while True:
             line = (await Request._safe_readline(
                 client_reader)).strip().decode()
@@ -417,21 +432,46 @@ class Request:
             header, value = line.split(':', 1)
             value = value.strip()
             headers[header] = value
-            if header.lower() == 'content-length':
-                content_length = int(value)
 
         # body
+        # the Content-Length header is parsed leniently here: a missing,
+        # malformed or negative value results in no body being read. When the
+        # header is malformed the resulting request is still created so that
+        # ``dispatch_request`` can return a consistent 400 response.
+        content_length = Request._parse_content_length(
+            headers.get('Content-Length')) or 0
         body = b''
-        if content_length and content_length <= Request.max_body_length:
-            body = await client_reader.readexactly(content_length)
-            stream = None
-        else:
-            body = b''
+        stream = None
+        incomplete = False
+        if Request._buffer_body(content_length):
+            # the body fits within the configured limit, so it is read into
+            # memory
+            try:
+                body = await client_reader.readexactly(content_length)
+            except EOFError as exc:
+                # the client closed the connection before the declared number
+                # of bytes was received (``asyncio.IncompleteReadError`` is a
+                # subclass of ``EOFError`` and carries the partial data that
+                # was received before the disconnect)
+                body = getattr(exc, 'partial', b'')
+                incomplete = True
+            if len(body) != content_length:
+                # some stream implementations return a short read instead of
+                # raising when the client disconnects before sending the
+                # complete body
+                incomplete = True
+        elif content_length:
+            # the body is larger than ``max_body_length`` (or larger than
+            # ``max_content_length``, in which case it will be rejected), so it
+            # is left to be consumed through the stream interface
             stream = client_reader
 
-        return Request(app, client_addr, method, url, http_version, headers,
-                       body=body, stream=stream,
-                       sock=(client_reader, client_writer), scheme=scheme)
+        request = Request(app, client_addr, method, url, http_version, headers,
+                          body=body, stream=stream,
+                          sock=(client_reader, client_writer), scheme=scheme)
+        if incomplete:
+            request.body_incomplete = True
+        return request
 
     def _parse_urlencoded(self, urlencoded):
         data = MultiDict()
@@ -450,12 +490,26 @@ class Request:
 
     @property
     def body(self):
-        """The body of the request, as bytes."""
+        """The body of the request, as bytes.
+
+        Only bodies up to :attr:`max_body_length` bytes are available through
+        this attribute. When the request body is larger than that limit it is
+        not loaded into memory and this attribute is an empty byte sequence; in
+        that case the body must be read through the :attr:`stream` attribute
+        instead.
+        """
         return self._body
 
     @property
     def stream(self):
-        """The body of the request, as a bytes stream."""
+        """The body of the request, as a bytes stream.
+
+        This attribute should be used to read request bodies that are too large
+        to be held in memory (see :attr:`max_body_length`). Note that the
+        :attr:`body`, :attr:`json` and :attr:`form` attributes only reflect the
+        in-memory body, so they should not be combined with reads from this
+        stream for the same request.
+        """
         if self._stream is None:
             self._stream = AsyncBytesIO(self._body)
         return self._stream
@@ -463,12 +517,19 @@ class Request:
     @property
     def json(self):
         """The parsed JSON body, or ``None`` if the request does not have a
-        JSON body."""
+        JSON body.
+
+        This attribute returns ``None`` when the body is empty, which includes
+        the case of a large body that was streamed rather than loaded into
+        memory.
+        """
         if self._json is None:
             if self.content_type is None:
                 return None
             mime_type = self.content_type.split(';')[0]
             if mime_type != 'application/json':
+                return None
+            if not self.body:
                 return None
             self._json = json.loads(self.body.decode())
         return self._json
@@ -535,6 +596,39 @@ class Request:
         if len(line) > Request.max_readline:
             raise ValueError('line too long')
         return line
+
+    @staticmethod
+    def _parse_content_length(value):
+        """Parse and validate a ``Content-Length`` header value.
+
+        :param value: The raw header value, or ``None`` if the header is not
+                      present.
+
+        Returns the length as a non-negative integer, or ``None`` if the value
+        is missing or not a valid non-negative integer. This helper is shared
+        by the standard, ASGI and WSGI request handling code so that all three
+        run modes interpret the header in the same way.
+        """
+        if value is None:
+            return None
+        try:
+            length = int(value)
+        except (ValueError, TypeError):
+            return None
+        if length < 0:
+            return None
+        return length
+
+    @staticmethod
+    def _buffer_body(content_length):
+        """Return whether a body of the given size should be read into memory.
+
+        Bodies up to :attr:`max_body_length` bytes are buffered in the
+        :attr:`body` attribute. Larger bodies are left to be consumed through
+        the :attr:`stream` attribute. This decision is shared by all run modes
+        to keep their behavior consistent.
+        """
+        return 0 < content_length <= Request.max_body_length
 
 
 class Response:
@@ -1440,7 +1534,15 @@ class Microdot:
     async def dispatch_request(self, req):
         after_request_handled = False
         if req:
-            if req.content_length > req.max_content_length:
+            if req.invalid_headers:
+                # the request includes a header that could not be parsed, such
+                # as a malformed Content-Length
+                res = await self.error_response(req, 400, 'Bad request')
+            elif req.body_incomplete:
+                # the client disconnected before sending the complete body
+                res = await self.error_response(
+                    req, 400, 'Request body incomplete')
+            elif req.content_length > req.max_content_length:
                 # the request body is larger than allowed
                 res = await self.error_response(req, 413, 'Payload too large')
             else:

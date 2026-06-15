@@ -114,6 +114,98 @@ class TestWSGI(unittest.TestCase):
 
         Request.max_body_length = saved_max_body_length
 
+    def test_malformed_content_length(self):
+        # a malformed Content-Length header is rejected with a 400 response and
+        # the route handler is never invoked
+        app = Microdot()
+
+        @app.post('/foo')
+        def index(req):  # pragma: no cover
+            return 'should not run'
+
+        environ = {
+            'PATH_INFO': '/foo',
+            'CONTENT_LENGTH': 'not-a-number',
+            'REMOTE_ADDR': '1.2.3.4',
+            'REMOTE_PORT': '1234',
+            'REQUEST_METHOD': 'POST',
+            'SERVER_PROTOCOL': 'HTTP/1.1',
+            'wsgi.input': io.BytesIO(b'xxx'),
+        }
+
+        captured = {}
+
+        def start_response(status, headers):
+            captured['status'] = status
+
+        body = b''.join(app(environ, start_response))
+        self.assertTrue(captured['status'].startswith('400'))
+        self.assertEqual(body, b'Bad request')
+
+    def test_incomplete_body(self):
+        # a client that disconnects before sending the number of bytes declared
+        # in Content-Length is rejected with a 400 response
+        app = Microdot()
+
+        @app.post('/foo')
+        def index(req):  # pragma: no cover
+            return 'should not run'
+
+        environ = {
+            'PATH_INFO': '/foo',
+            'CONTENT_LENGTH': '10',
+            'REMOTE_ADDR': '1.2.3.4',
+            'REMOTE_PORT': '1234',
+            'REQUEST_METHOD': 'POST',
+            'SERVER_PROTOCOL': 'HTTP/1.1',
+            'wsgi.input': io.BytesIO(b'abc'),
+        }
+
+        captured = {}
+
+        def start_response(status, headers):
+            captured['status'] = status
+
+        body = b''.join(app(environ, start_response))
+        self.assertTrue(captured['status'].startswith('400'))
+        self.assertEqual(body, b'Request body incomplete')
+
+    def test_payload_too_large(self):
+        # a body larger than max_content_length is rejected with a 413 response
+        # without being read into memory
+        saved_max_content_length = Request.max_content_length
+        saved_max_body_length = Request.max_body_length
+        Request.max_content_length = 32
+        Request.max_body_length = 16
+
+        app = Microdot()
+
+        @app.post('/foo')
+        def index(req):  # pragma: no cover
+            return 'should not run'
+
+        environ = {
+            'PATH_INFO': '/foo',
+            'CONTENT_LENGTH': '100',
+            'REMOTE_ADDR': '1.2.3.4',
+            'REMOTE_PORT': '1234',
+            'REQUEST_METHOD': 'POST',
+            'SERVER_PROTOCOL': 'HTTP/1.1',
+            'wsgi.input': io.BytesIO(b'x' * 100),
+        }
+
+        captured = {}
+
+        def start_response(status, headers):
+            captured['status'] = status
+
+        body = b''.join(app(environ, start_response))
+        self.assertTrue(captured['status'].startswith('413'))
+        self.assertEqual(body, b'Payload too large')
+
+        Request.max_content_length = saved_max_content_length
+        Request.max_body_length = saved_max_body_length
+
     def test_shutdown(self):
         app = Microdot()
 

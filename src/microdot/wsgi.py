@@ -26,7 +26,6 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
         if 'QUERY_STRING' in environ and environ['QUERY_STRING']:
             path += '?' + environ['QUERY_STRING']
         headers = NoCaseDict()
-        content_length = 0
         for k, value in environ.items():
             if k.startswith('HTTP_'):
                 key = '-'.join([p.title() for p in k[5:].split('_')])
@@ -35,7 +34,8 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 headers['Content-Type'] = value
             elif k == 'CONTENT_LENGTH':
                 headers['Content-Length'] = value
-                content_length = int(value)
+        content_length = Request._parse_content_length(
+            headers.get('Content-Length')) or 0
 
         class sync_to_async_body_stream():  # pragma: no cover
             def __init__(self, wsgi_input=None):
@@ -51,11 +51,15 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 return self.wsgi_input.read(n)
 
         wsgi_input = environ.get('wsgi.input')
-        if content_length and content_length <= Request.max_body_length:
+        body_incomplete = False
+        if Request._buffer_body(content_length):
             # the request came with a body that is within the allowed size
             body = wsgi_input.read(content_length)
             stream = None
             sock = (None, None)
+            # a short read means the client disconnected before sending the
+            # complete body declared by Content-Length
+            body_incomplete = len(body) != content_length
         else:
             body = b''
             if content_length:
@@ -99,6 +103,8 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
             sock=sock,
             scheme=environ.get('wsgi.url_scheme'))
         req.environ = environ
+        if body_incomplete:
+            req.body_incomplete = True
 
         res = self.loop.run_until_complete(self.dispatch_request(req))
         res.complete()

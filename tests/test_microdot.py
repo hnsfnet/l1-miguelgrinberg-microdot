@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from microdot import Microdot, Response, abort
+from microdot.microdot import Request
 from microdot.test_client import TestClient
 
 
@@ -542,6 +543,64 @@ class TestMicrodot(unittest.TestCase):
         self.assertEqual(res.headers['Content-Type'],
                          'text/plain; charset=UTF-8')
         self.assertEqual(res.text, '413')
+
+    def test_400_invalid_content_length(self):
+        app = Microdot()
+
+        @app.route('/', methods=['POST'])
+        def index(req):  # pragma: no cover
+            return 'foo'
+
+        client = TestClient(app)
+        res = self._run(client.post(
+            '/', headers={'Content-Length': 'not-a-number'}, body='x'))
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.text, 'Bad request')
+
+    def test_400_invalid_content_length_handler(self):
+        app = Microdot()
+
+        @app.route('/', methods=['POST'])
+        def index(req):  # pragma: no cover
+            return 'foo'
+
+        @app.errorhandler(400)
+        async def handle_400(req):
+            return 'custom', 400
+
+        client = TestClient(app)
+        res = self._run(client.post(
+            '/', headers={'Content-Length': '-1'}, body='x'))
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.text, 'custom')
+
+    def test_400_body_incomplete(self):
+        app = Microdot()
+
+        req = Request(app, ('127.0.0.1', 1234), 'POST', '/foo', '1.0', {})
+        req.body_incomplete = True
+        res = self._run(app.dispatch_request(req))
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.body, b'Request body incomplete')
+
+    def test_stream_request(self):
+        saved_max_body_length = Request.max_body_length
+        Request.max_body_length = 4
+
+        app = Microdot()
+
+        @app.route('/', methods=['POST'])
+        async def index(req):
+            self.assertEqual(req.body, b'')
+            data = await req.stream.read()
+            return data
+
+        client = TestClient(app)
+        res = self._run(client.post('/', body='hello world'))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.body, b'hello world')
+
+        Request.max_body_length = saved_max_body_length
 
     def test_500(self):
         app = Microdot()

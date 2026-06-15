@@ -1,7 +1,8 @@
 import asyncio
 import unittest
 from microdot.microdot import MultiDict, Request
-from tests.mock_socket import get_async_request_fd
+from tests.mock_socket import get_async_request_fd, get_request_fd, \
+    FakeStreamAsync
 
 
 class TestRequest(unittest.TestCase):
@@ -129,4 +130,82 @@ class TestRequest(unittest.TestCase):
         self.assertEqual(data, b'foo=bar&abc=def&x=y')
 
         Request.max_content_length = saved_max_content_length
+        Request.max_body_length = saved_max_body_length
+
+    def test_parse_content_length(self):
+        self.assertIsNone(Request._parse_content_length(None))
+        self.assertIsNone(Request._parse_content_length('abc'))
+        self.assertIsNone(Request._parse_content_length('-1'))
+        self.assertIsNone(Request._parse_content_length('1.5'))
+        self.assertEqual(Request._parse_content_length('0'), 0)
+        self.assertEqual(Request._parse_content_length('42'), 42)
+
+    def test_buffer_body(self):
+        saved_max_body_length = Request.max_body_length
+        Request.max_body_length = 16
+        self.assertFalse(Request._buffer_body(0))
+        self.assertTrue(Request._buffer_body(1))
+        self.assertTrue(Request._buffer_body(16))
+        self.assertFalse(Request._buffer_body(17))
+        Request.max_body_length = saved_max_body_length
+
+    def test_malformed_content_length(self):
+        fd = get_async_request_fd('POST', '/foo', headers={
+            'Content-Length': 'not-a-number'}, body='xxx')
+        req = self._run(Request.create('app', fd, 'writer', 'addr'))
+        self.assertTrue(req.invalid_headers)
+        self.assertEqual(req.content_length, 0)
+        self.assertEqual(req.body, b'')
+
+    def test_negative_content_length(self):
+        fd = get_async_request_fd('POST', '/foo', headers={
+            'Content-Length': '-5'}, body='xxx')
+        req = self._run(Request.create('app', fd, 'writer', 'addr'))
+        self.assertTrue(req.invalid_headers)
+        self.assertEqual(req.content_length, 0)
+
+    def test_incomplete_body_short_read(self):
+        # the client declared more bytes than it actually sent
+        fd = get_async_request_fd('POST', '/foo', headers={
+            'Content-Length': '10'}, body='abc')
+        req = self._run(Request.create('app', fd, 'writer', 'addr'))
+        self.assertTrue(req.body_incomplete)
+        self.assertFalse(req.invalid_headers)
+
+    def test_incomplete_body_disconnect(self):
+        # a stream that raises when the client disconnects mid-body, carrying
+        # the partial data that was received (as asyncio.IncompleteReadError
+        # does)
+        class DisconnectReader(FakeStreamAsync):
+            async def readexactly(self, n):
+                exc = EOFError()
+                exc.partial = b'ab'
+                raise exc
+
+        fd = get_request_fd('POST', '/foo', headers={'Content-Length': '10'})
+        reader = DisconnectReader(fd)
+        req = self._run(Request.create('app', reader, 'writer', 'addr'))
+        self.assertTrue(req.body_incomplete)
+        self.assertEqual(req.body, b'ab')
+
+    def test_json_empty_body(self):
+        # a JSON content type with no body must not raise when accessing json
+        fd = get_async_request_fd('POST', '/foo', headers={
+            'Content-Type': 'application/json'})
+        req = self._run(Request.create('app', fd, 'writer', 'addr'))
+        self.assertIsNone(req.json)
+
+    def test_json_streamed_body(self):
+        # a large JSON body that is streamed leaves json as None instead of
+        # raising on an empty in-memory body
+        saved_max_body_length = Request.max_body_length
+        Request.max_body_length = 4
+
+        fd = get_async_request_fd('POST', '/foo', headers={
+            'Content-Type': 'application/json',
+            'Content-Length': '13'}, body='{"foo": "bar"}'[:13])
+        req = self._run(Request.create('app', fd, 'writer', 'addr'))
+        self.assertEqual(req.body, b'')
+        self.assertIsNone(req.json)
+
         Request.max_body_length = saved_max_body_length

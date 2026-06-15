@@ -3,7 +3,7 @@ import sys
 import unittest
 from unittest import mock
 
-from microdot.asgi import Microdot, Response
+from microdot.asgi import Microdot, Response, Request
 
 
 @unittest.skipIf(sys.implementation.name == 'micropython',
@@ -144,6 +144,125 @@ class TestASGI(unittest.TestCase):
             pass
 
         self._run(app(scope, receive, send))
+
+    def test_asgi_malformed_content_length(self):
+        # a malformed Content-Length header is rejected with a 400 response and
+        # the route handler is never invoked
+        app = Microdot()
+
+        @app.post('/foo')
+        async def index(req):  # pragma: no cover
+            return 'should not run'
+
+        scope = {
+            'type': 'http',
+            'path': '/foo',
+            'headers': [(b'Content-Length', b'not-a-number')],
+            'client': ['1.2.3.4', 1234],
+            'method': 'POST',
+            'http_version': '1.1',
+        }
+
+        events = iter([{'type': 'http.request', 'body': b'xxx',
+                        'more_body': False}])
+
+        async def receive():
+            try:
+                return next(events)
+            except StopIteration:
+                return {'type': 'http.disconnect'}
+
+        captured = {'body': b''}
+
+        async def send(packet):
+            if packet['type'] == 'http.response.start':
+                captured['status'] = packet['status']
+            elif packet['type'] == 'http.response.body':
+                captured['body'] += packet.get('body', b'')
+
+        self._run(app(scope, receive, send))
+        self.assertEqual(captured['status'], 400)
+        self.assertEqual(captured['body'], b'Bad request')
+
+    def test_asgi_incomplete_body(self):
+        # a client that disconnects before sending the number of bytes declared
+        # in Content-Length is rejected with a 400 response
+        app = Microdot()
+
+        @app.post('/foo')
+        async def index(req):  # pragma: no cover
+            return 'should not run'
+
+        scope = {
+            'type': 'http',
+            'path': '/foo',
+            'headers': [(b'Content-Length', b'10')],
+            'client': ['1.2.3.4', 1234],
+            'method': 'POST',
+            'http_version': '1.1',
+        }
+
+        events = iter([{'type': 'http.request', 'body': b'abc',
+                        'more_body': False}])
+
+        async def receive():
+            try:
+                return next(events)
+            except StopIteration:
+                return {'type': 'http.disconnect'}
+
+        captured = {'body': b''}
+
+        async def send(packet):
+            if packet['type'] == 'http.response.start':
+                captured['status'] = packet['status']
+            elif packet['type'] == 'http.response.body':
+                captured['body'] += packet.get('body', b'')
+
+        self._run(app(scope, receive, send))
+        self.assertEqual(captured['status'], 400)
+        self.assertEqual(captured['body'], b'Request body incomplete')
+
+    def test_asgi_payload_too_large(self):
+        # a body larger than max_content_length is rejected with a 413 response
+        # without being read into memory
+        saved_max_content_length = Request.max_content_length
+        saved_max_body_length = Request.max_body_length
+        Request.max_content_length = 32
+        Request.max_body_length = 16
+
+        app = Microdot()
+
+        @app.post('/foo')
+        async def index(req):  # pragma: no cover
+            return 'should not run'
+
+        scope = {
+            'type': 'http',
+            'path': '/foo',
+            'headers': [(b'Content-Length', b'100')],
+            'client': ['1.2.3.4', 1234],
+            'method': 'POST',
+            'http_version': '1.1',
+        }
+
+        async def receive():
+            return {'type': 'http.disconnect'}
+
+        captured = {'body': b''}
+
+        async def send(packet):
+            if packet['type'] == 'http.response.start':
+                captured['status'] = packet['status']
+            elif packet['type'] == 'http.response.body':
+                captured['body'] += packet.get('body', b'')
+
+        self._run(app(scope, receive, send))
+        self.assertEqual(captured['status'], 413)
+        self.assertEqual(captured['body'], b'Payload too large')
+
+        Request.max_content_length = saved_max_content_length
+        Request.max_body_length = saved_max_body_length
 
     def test_shutdown(self):
         app = Microdot()

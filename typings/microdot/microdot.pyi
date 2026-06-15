@@ -113,6 +113,8 @@ class Request:
     cookies: dict[str, str]
     content_length: int
     content_type: str | None
+    invalid_headers: bool
+    body_incomplete: bool
     g: G
     http_version: str
     body_used: bool
@@ -124,7 +126,15 @@ class Request:
     @staticmethod
     async def create(app, client_reader: StreamReader, client_writer: StreamWriter, client_addr: Tuple[str, int], scheme: str | None = ...) -> Request:
         ...
-    
+
+    @staticmethod
+    def _parse_content_length(value: str | None) -> int | None:
+        ...
+
+    @staticmethod
+    def _buffer_body(content_length: int) -> bool:
+        ...
+
     @property
     def body(self) -> bytes | None:
         ...

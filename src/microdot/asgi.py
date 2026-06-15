@@ -95,14 +95,14 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
         if 'query_string' in scope and scope['query_string']:
             path += '?' + scope['query_string'].decode()
         headers = NoCaseDict()
-        content_length = 0
         for key, value in scope.get('headers', []):
             key = key.decode().title()
             headers[key] = value.decode()
-            if key == 'Content-Length':
-                content_length = int(value)
+        content_length = Request._parse_content_length(
+            headers.get('Content-Length')) or 0
 
-        if content_length and content_length <= Request.max_body_length:
+        body_incomplete = False
+        if Request._buffer_body(content_length):
             body = b''
             more = True
             while more:
@@ -110,7 +110,13 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 body += packet.get('body', b'')
                 more = packet.get('more_body', False)
             stream = None
+            # if fewer bytes than declared by Content-Length were received, the
+            # client disconnected before sending the complete body
+            body_incomplete = len(body) != content_length
         else:
+            # large, chunked or malformed requests are exposed through the
+            # stream interface; malformed or oversized requests are rejected by
+            # dispatch_request before the stream is read
             body = b''
             stream = _BodyStream(receive)
 
@@ -126,6 +132,8 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
             sock=(receive, send),
             scheme=scope.get('scheme'))
         req.asgi_scope = scope
+        if body_incomplete:
+            req.body_incomplete = True
 
         res = await self.dispatch_request(req)
         res.complete()

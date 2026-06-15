@@ -89,6 +89,18 @@ body contents as a file-like object. The
 request object defines the size at which bodies are streamed instead of loaded
 into memory.
 
+.. note::
+   The :attr:`body <microdot.Request.body>`,
+   :attr:`json <microdot.Request.json>` and
+   :attr:`form <microdot.Request.form>` attributes only reflect the in-memory
+   body. When a request body is larger than
+   :attr:`max_body_length <microdot.Request.max_body_length>` it is not loaded
+   into memory, so ``body`` is an empty byte sequence and ``json`` and ``form``
+   return ``None``. In that situation the body must be consumed exclusively
+   through the :attr:`stream <microdot.Request.stream>` attribute. To avoid
+   inconsistent results, a single request body should be read either through
+   ``body``/``json``/``form`` or through ``stream``, but not both.
+
 Cookies
 ^^^^^^^
 
@@ -167,3 +179,29 @@ being loaded into memory::
 
     Request.max_content_length = 1024 * 1024
     Request.max_body_length = 8 * 1024
+
+Error Responses for Invalid Bodies
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Microdot rejects requests with problematic bodies with a well-defined error
+response instead of failing with a low-level exception or a dropped connection.
+The same behavior applies regardless of whether the application runs with the
+built-in server or under an ASGI or WSGI server:
+
+- A request whose body is larger than
+  :attr:`max_content_length <microdot.Request.max_content_length>` is rejected
+  with a ``413 Payload too large`` response. The oversized body is not loaded
+  into memory.
+- A request with a malformed ``Content-Length`` header (one that is not a
+  non-negative integer) is rejected with a ``400 Bad request`` response.
+- A request whose client disconnects before sending the number of bytes
+  declared in ``Content-Length`` is rejected with a
+  ``400 Request body incomplete`` response.
+
+As with any other error, these responses can be customized by registering an
+:func:`error handler <microdot.Microdot.errorhandler>` for the corresponding
+status code::
+
+    @app.errorhandler(413)
+    def payload_too_large(request):
+        return {'error': 'request body too large'}, 413
