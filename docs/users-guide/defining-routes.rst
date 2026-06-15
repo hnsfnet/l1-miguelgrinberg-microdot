@@ -376,3 +376,68 @@ request completes. The next example shows how to use this feature::
 The request that invokes the ``shutdown()`` method will complete, and then the
 server will not accept any new requests and stop once any remaining requests
 complete. At this point the ``app.run()`` call will return.
+
+Exporting an OpenAPI Specification
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Microdot includes a lightweight module for exporting the routes of an
+application as an `OpenAPI 3.0 <https://spec.openapis.org/oas/v3.0.3>`_
+specification. This is useful for generating API documentation, driving
+client code generators, or feeding the spec into tools such as Swagger UI.
+
+Basic usage::
+
+    from microdot import Microdot
+    from microdot.openapi import get_openapi, get_openapi_json
+
+    app = Microdot()
+
+    @app.get('/users/<int:id>')
+    def get_user(request, id):
+        """Retrieve a user by ID."""
+        ...
+
+    # As a Python dict
+    spec = get_openapi(app, title='My API', version='1.0.0')
+
+    # As a JSON string
+    spec_json = get_openapi_json(app, title='My API', version='1.0.0')
+
+The specification is built by introspecting the routes registered on the
+application. Dynamic URL segments such as ``<int:id>`` are converted to
+OpenAPI path parameters automatically, and the handler's docstring (if any)
+is used as the operation summary and description.
+
+Adding explicit metadata
+++++++++++++++++++++++++
+
+For richer output you can attach metadata to individual handlers using the
+:func:`openapi() <microdot.openapi.openapi>` decorator::
+
+    from microdot.openapi import openapi
+
+    @app.get('/items/<int:id>')
+    @openapi(
+        summary='Get an item',
+        description='Retrieve an item by its numeric ID.',
+        responses={
+            200: {'description': 'The requested item'},
+            404: {'description': 'Item not found'},
+        },
+    )
+    def get_item(request, id):
+        ...
+
+Serving the spec as a route
++++++++++++++++++++++++++++
+
+A common pattern is to expose the JSON specification itself as a route::
+
+    @app.get('/openapi.json')
+    def openapi_spec(request):
+        return get_openapi_json(app, title='My API', version='1.0.0'), \\
+            200, {'Content-Type': 'application/json'}
+
+This makes it easy to point Swagger UI or any other OpenAPI consumer at your
+running application. See the ``examples/openapi`` directory in the Microdot
+repository for a complete working example.
