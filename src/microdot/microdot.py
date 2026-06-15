@@ -366,7 +366,12 @@ class Request:
             self.args = self._parse_urlencoded(self.query_string)
 
         if 'Content-Length' in self.headers:
-            self.content_length = int(self.headers['Content-Length'])
+            try:
+                self.content_length = int(self.headers['Content-Length'])
+                if self.content_length < 0:
+                    raise ValueError('negative content length')
+            except (ValueError, TypeError):
+                raise RequestError(400, 'Invalid Content-Length header')
         if 'Content-Type' in self.headers:
             self.content_type = self.headers['Content-Type']
         if 'Cookie' in self.headers:
@@ -381,6 +386,7 @@ class Request:
         self._json = None
         self._form = None
         self._files = None
+        self._body_too_large = False
         self.after_request_handlers = []
 
     @staticmethod
@@ -418,20 +424,37 @@ class Request:
             value = value.strip()
             headers[header] = value
             if header.lower() == 'content-length':
-                content_length = int(value)
+                try:
+                    content_length = int(value)
+                    if content_length < 0:
+                        raise ValueError('negative content length')
+                except (ValueError, TypeError):
+                    raise RequestError(400,
+                                       'Invalid Content-Length header')
 
         # body
         body = b''
-        if content_length and content_length <= Request.max_body_length:
-            body = await client_reader.readexactly(content_length)
-            stream = None
-        else:
-            body = b''
+        stream = None
+        body_too_large = False
+        if content_length > Request.max_content_length:
+            # body exceeds maximum allowed size; don't read it but mark
+            # the request so that dispatch_request returns 413
+            body_too_large = True
+            stream = client_reader
+        elif content_length > 0 and content_length <= Request.max_body_length:
+            try:
+                body = await client_reader.readexactly(content_length)
+            except (OSError, EOFError, asyncio.IncompleteReadError) as exc:
+                raise RequestError(400,
+                                   'Failed to read request body: ' + str(exc))
+        elif content_length > 0:
             stream = client_reader
 
-        return Request(app, client_addr, method, url, http_version, headers,
+        req = Request(app, client_addr, method, url, http_version, headers,
                        body=body, stream=stream,
                        sock=(client_reader, client_writer), scheme=scheme)
+        req._body_too_large = body_too_large
+        return req
 
     def _parse_urlencoded(self, urlencoded):
         data = MultiDict()
@@ -463,14 +486,28 @@ class Request:
     @property
     def json(self):
         """The parsed JSON body, or ``None`` if the request does not have a
-        JSON body."""
+        JSON body.
+
+        Raises :class:`RequestError` if the body was too large to be buffered
+        (read from ``stream`` instead), or if the JSON is malformed.
+        """
         if self._json is None:
             if self.content_type is None:
                 return None
             mime_type = self.content_type.split(';')[0]
             if mime_type != 'application/json':
                 return None
-            self._json = json.loads(self.body.decode())
+            if self._body_too_large:
+                raise RequestError(413, 'Payload too large')
+            if self._body is None or (self._body == b'' and
+                                       self._stream is not None and
+                                       self.content_length > 0):
+                raise RequestError(
+                    400, 'Request body is only available via stream')
+            try:
+                self._json = json.loads(self.body.decode())
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise RequestError(400, 'Invalid JSON body: ' + str(exc))
         return self._json
 
     @property
@@ -483,6 +520,9 @@ class Request:
         forms to be processed, the
         :func:`with_form_data <microdot.multipart.with_form_data>`
         decorator must be added to the route.
+
+        Raises :class:`RequestError` if the body was too large to be buffered
+        (read from ``stream`` instead).
         """
         if self._form is None:
             if self.content_type is None:
@@ -490,6 +530,13 @@ class Request:
             mime_type = self.content_type.split(';')[0]
             if mime_type != 'application/x-www-form-urlencoded':
                 return None
+            if self._body_too_large:
+                raise RequestError(413, 'Payload too large')
+            if self._body is None or (self._body == b'' and
+                                       self._stream is not None and
+                                       self.content_length > 0):
+                raise RequestError(
+                    400, 'Request body is only available via stream')
             self._form = self._parse_urlencoded(self.body)
         return self._form
 
@@ -937,6 +984,27 @@ class HTTPException(Exception):
 
     def __repr__(self):  # pragma: no cover
         return 'HTTPException: {}'.format(self.status_code)
+
+
+class RequestError(Exception):
+    """Exception raised when a request body cannot be processed.
+
+    :param status_code: The HTTP status code to return.
+    :param reason: A human-readable reason string.
+
+    This exception is raised in the following cases:
+
+    - ``400``: The ``Content-Length`` header is missing, malformed, or
+      inconsistent with the actual body.
+    - ``413``: The request body exceeds ``Request.max_content_length``.
+    - ``400``: The client disconnected before the full body was received.
+    """
+    def __init__(self, status_code, reason=None):
+        self.status_code = status_code
+        self.reason = reason or str(status_code) + ' error'
+
+    def __repr__(self):  # pragma: no cover
+        return 'RequestError: {}'.format(self.status_code)
 
 
 class Microdot:
@@ -1399,6 +1467,15 @@ class Microdot:
         try:
             req = await Request.create(self, reader, writer,
                                        writer.get_extra_info('peername'))
+        except RequestError as exc:
+            # request parsing failed due to a body/header error
+            res = Response(exc.reason, exc.status_code)
+            try:
+                await res.write(writer)
+                await writer.aclose()
+            except OSError:  # pragma: no cover
+                pass
+            return
         except OSError as exc:  # pragma: no cover
             if exc.errno in MUTED_SOCKET_ERRORS:
                 pass
@@ -1510,6 +1587,10 @@ class Microdot:
                         res = await self.error_response(req, f, 'Not found')
                 except HTTPException as exc:
                     # an HTTP exception was raised while handling this request
+                    res = await self.error_response(req, exc.status_code,
+                                                    exc.reason)
+                except RequestError as exc:
+                    # a request body parsing error was raised
                     res = await self.error_response(req, exc.status_code,
                                                     exc.reason)
                 except Exception as exc:

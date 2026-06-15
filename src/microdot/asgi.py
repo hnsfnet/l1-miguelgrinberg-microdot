@@ -3,7 +3,7 @@ import os
 import signal
 from microdot import *  # noqa: F401, F403
 from microdot.microdot import Microdot as BaseMicrodot, Request, Response, \
-    NoCaseDict, abort
+    NoCaseDict, RequestError, abort
 from microdot.websocket import WebSocket as BaseWebSocket, websocket_wrapper
 
 
@@ -100,31 +100,73 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
             key = key.decode().title()
             headers[key] = value.decode()
             if key == 'Content-Length':
-                content_length = int(value)
+                try:
+                    content_length = int(value)
+                    if content_length < 0:
+                        raise ValueError('negative content length')
+                except (ValueError, TypeError):
+                    header_list = [
+                        (b'content-type', b'text/plain; charset=UTF-8'),
+                        (b'content-length', b'28'),
+                    ]
+                    await send({'type': 'http.response.start',
+                                'status': 400,
+                                'headers': header_list})
+                    await send({'type': 'http.response.body',
+                                'body': b'Invalid Content-Length header',
+                                'more_body': False})
+                    return
 
         if content_length and content_length <= Request.max_body_length:
+            if content_length > Request.max_content_length:
+                # body is within bufferable size but exceeds max content length
+                body = b''
+                stream = _BodyStream(receive)
+                body_too_large = True
+            else:
+                body = b''
+                more = True
+                while more:
+                    packet = await receive()
+                    body += packet.get('body', b'')
+                    more = packet.get('more_body', False)
+                stream = None
+                body_too_large = False
+        elif content_length > Request.max_content_length:
             body = b''
-            more = True
-            while more:
-                packet = await receive()
-                body += packet.get('body', b'')
-                more = packet.get('more_body', False)
-            stream = None
+            stream = _BodyStream(receive)
+            body_too_large = True
         else:
             body = b''
             stream = _BodyStream(receive)
+            body_too_large = False
 
-        req = Request(
-            self,
-            (scope['client'][0], scope['client'][1]),
-            scope.get('method', 'GET'),
-            path,
-            'HTTP/' + scope['http_version'],
-            headers,
-            body=body,
-            stream=stream,
-            sock=(receive, send),
-            scheme=scope.get('scheme'))
+        try:
+            req = Request(
+                self,
+                (scope['client'][0], scope['client'][1]),
+                scope.get('method', 'GET'),
+                path,
+                'HTTP/' + scope['http_version'],
+                headers,
+                body=body,
+                stream=stream,
+                sock=(receive, send),
+                scheme=scope.get('scheme'))
+        except RequestError as exc:
+            # request parsing failed (e.g., invalid Content-Length)
+            header_list = [
+                (b'content-type', b'text/plain; charset=UTF-8'),
+                (b'content-length', str(len(exc.reason)).encode()),
+            ]
+            await send({'type': 'http.response.start',
+                        'status': exc.status_code,
+                        'headers': header_list})
+            await send({'type': 'http.response.body',
+                        'body': exc.reason.encode(),
+                        'more_body': False})
+            return
+        req._body_too_large = body_too_large
         req.asgi_scope = scope
 
         res = await self.dispatch_request(req)

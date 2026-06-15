@@ -3,7 +3,7 @@ import os
 import signal
 from microdot import *  # noqa: F401, F403
 from microdot.microdot import Microdot as BaseMicrodot, Request, NoCaseDict, \
-    MUTED_SOCKET_ERRORS
+    RequestError, MUTED_SOCKET_ERRORS
 from microdot.websocket import WebSocket, websocket_upgrade, \
     with_websocket  # noqa: F401
 
@@ -35,7 +35,19 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 headers['Content-Type'] = value
             elif k == 'CONTENT_LENGTH':
                 headers['Content-Length'] = value
-                content_length = int(value)
+                try:
+                    content_length = int(value)
+                    if content_length < 0:
+                        raise ValueError('negative content length')
+                except (ValueError, TypeError):
+                    reason = 'Invalid Content-Length header'
+                    reason_bytes = reason.encode()
+                    header_list = [
+                        ('Content-Type', 'text/plain; charset=UTF-8'),
+                        ('Content-Length', str(len(reason_bytes))),
+                    ]
+                    start_response('400 ' + reason, header_list)
+                    return [reason_bytes]
 
         class sync_to_async_body_stream():  # pragma: no cover
             def __init__(self, wsgi_input=None):
@@ -51,11 +63,19 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 return self.wsgi_input.read(n)
 
         wsgi_input = environ.get('wsgi.input')
+        body_too_large = False
         if content_length and content_length <= Request.max_body_length:
-            # the request came with a body that is within the allowed size
-            body = wsgi_input.read(content_length)
-            stream = None
-            sock = (None, None)
+            if content_length > Request.max_content_length:
+                # body is within bufferable size but exceeds max content length
+                body = b''
+                stream = sync_to_async_body_stream(wsgi_input)
+                sock = (None, None)
+                body_too_large = True
+            else:
+                # the request came with a body that is within the allowed size
+                body = wsgi_input.read(content_length)
+                stream = None
+                sock = (None, None)
         else:
             body = b''
             if content_length:
@@ -63,6 +83,7 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 # memory, so we stream it
                 stream = sync_to_async_body_stream(wsgi_input)
                 sock = (None, None)
+                body_too_large = content_length > Request.max_content_length
             else:
                 # the request did not declare a body size, so we connect the
                 # raw socket if available
@@ -87,17 +108,29 @@ class Microdot(BaseMicrodot):  # type: ignore[no-redef]
                 else:
                     sock = (None, None)
 
-        req = Request(
-            self,
-            (environ['REMOTE_ADDR'], int(environ.get('REMOTE_PORT', '0'))),
-            environ['REQUEST_METHOD'],
-            path,
-            environ['SERVER_PROTOCOL'],
-            headers,
-            body=body,
-            stream=stream,
-            sock=sock,
-            scheme=environ.get('wsgi.url_scheme'))
+        try:
+            req = Request(
+                self,
+                (environ['REMOTE_ADDR'], int(environ.get('REMOTE_PORT', '0'))),
+                environ['REQUEST_METHOD'],
+                path,
+                environ['SERVER_PROTOCOL'],
+                headers,
+                body=body,
+                stream=stream,
+                sock=sock,
+                scheme=environ.get('wsgi.url_scheme'))
+        except RequestError as exc:
+            # request parsing failed (e.g., invalid Content-Length)
+            reason = exc.reason
+            reason_bytes = reason.encode()
+            header_list = [
+                ('Content-Type', 'text/plain; charset=UTF-8'),
+                ('Content-Length', str(len(reason_bytes))),
+            ]
+            start_response(str(exc.status_code) + ' ' + reason, header_list)
+            return [reason_bytes]
+        req._body_too_large = body_too_large
         req.environ = environ
 
         res = self.loop.run_until_complete(self.dispatch_request(req))
