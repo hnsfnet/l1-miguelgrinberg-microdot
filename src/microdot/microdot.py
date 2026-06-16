@@ -1193,6 +1193,141 @@ class Microdot:
                 self.error_handlers[status_code] = handler
             subapp.error_handlers = {}
 
+    def get_routes(self):
+        """Return a list of dictionaries describing all registered routes.
+
+        Each dictionary contains the following keys:
+
+        - ``methods``: a list of HTTP methods handled by the route.
+        - ``path``: the full URL pattern string, including any sub-application
+          prefix.
+        - ``handler``: the name of the handler function.
+        - ``is_dynamic``: ``True`` if the route has dynamic path segments.
+        - ``url_prefix``: the URL prefix if the route comes from a mounted
+          sub-application, or an empty string otherwise.
+        - ``subapp``: the sub-application instance, or ``None``.
+        - ``dynamic_params``: a list of names of dynamic path segments.
+        - ``warnings``: a list of warning strings for potentially problematic
+          route configurations.
+
+        Example::
+
+            for route in app.get_routes():
+                print(route['methods'], route['path'], route['handler'])
+        """
+        routes = []
+        seen = {}  # (path, method) -> (handler_name, index)
+        for methods, pattern, handler, prefix, subapp in self.url_map:
+            path = pattern.url_pattern
+            handler_name = getattr(handler, '__name__', str(handler))
+            # Ensure pattern is compiled to populate segments
+            if pattern.regex is None:
+                pattern.compile()
+            dynamic_params = [
+                seg['name'] for seg in pattern.segments if 'name' in seg
+            ]
+            is_dynamic = len(dynamic_params) > 0
+            warnings = []
+            for method in methods:
+                key = (path, method)
+                if key in seen:
+                    prev_handler, prev_index = seen[key]
+                    warning = (
+                        'Duplicate route: {method} {path} is already '
+                        'handled by {prev_handler}; the earlier registration '
+                        'will be shadowed'.format(
+                            method=method, path=path,
+                            prev_handler=prev_handler)
+                    )
+                    warnings.append(warning)
+                    # Also add warning to the earlier route entry
+                    routes[prev_index]['warnings'].append(
+                        'Duplicate route: {method} {path} is also handled '
+                        'by {handler}; this registration may be shadowed'
+                        .format(method=method, path=path,
+                                handler=handler_name)
+                    )
+                else:
+                    seen[key] = (handler_name, len(routes))
+            route_info = {
+                'methods': sorted(methods),
+                'path': path,
+                'handler': handler_name,
+                'is_dynamic': is_dynamic,
+                'url_prefix': prefix,
+                'subapp': subapp,
+                'dynamic_params': dynamic_params,
+                'warnings': warnings,
+            }
+            routes.append(route_info)
+        return routes
+
+    def print_routes(self, file=None):
+        """Print a formatted table of all registered routes.
+
+        :param file: A file-like object to write to. Defaults to standard
+                     output.
+
+        This method prints a human-readable table of all registered routes,
+        including HTTP methods, URL patterns, handler function names, and
+        any warnings about potentially problematic configurations.
+
+        Example::
+
+            app.print_routes()
+        """
+        import sys
+        routes = self.get_routes()
+        if not routes:
+            output = 'No routes registered.\n'
+            if file is None:
+                sys.stdout.write(output)
+            else:
+                file.write(output)
+            return
+
+        # Build rows
+        rows = []
+        for route in routes:
+            methods_str = ', '.join(route['methods'])
+            path = route['path']
+            handler = route['handler']
+            flags = []
+            if route['is_dynamic']:
+                flags.append('dynamic')
+            if route['url_prefix']:
+                flags.append('prefix:' + route['url_prefix'])
+            flags_str = ', '.join(flags) if flags else '-'
+            rows.append((methods_str, path, handler, flags_str))
+            for warning in route['warnings']:
+                rows.append(('', '  WARNING: ' + warning, '', ''))
+
+        # Calculate column widths
+        headers = ('Methods', 'Path', 'Handler', 'Flags')
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                if len(cell) > widths[i]:
+                    widths[i] = len(cell)
+
+        def format_row(cells):
+            parts = []
+            for i, cell in enumerate(cells):
+                parts.append(cell.ljust(widths[i]))
+            return '  '.join(parts) + '\n'
+
+        lines = []
+        lines.append(format_row(headers))
+        lines.append(format_row(['-' * w for w in widths]))
+        for row in rows:
+            lines.append(format_row(row))
+
+        output = ''.join(lines)
+        if file is None:
+            sys.stdout.write(output)
+        else:
+            file.write(output)
+
     @staticmethod
     def abort(status_code, reason=None):
         """Abort the current request and return an error response with the

@@ -358,6 +358,84 @@ that defaults to ``False``. When this argument is set to ``True``, the
 before-request, after-request and error handlers defined in the sub-application
 will only apply to the sub-application.
 
+Inspecting Registered Routes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+During development and debugging, it is often useful to see a list of all the
+routes that have been registered in an application. Microdot provides two
+methods for inspecting routes: :func:`get_routes() <microdot.Microdot.get_routes>`
+and :func:`print_routes() <microdot.Microdot.print_routes>`.
+
+The ``get_routes()`` method returns a list of dictionaries, one for each
+registered route. Each dictionary contains detailed information about the route::
+
+    app = Microdot()
+
+    @app.get('/users/<int:id>')
+    async def get_user(request, id):
+        # ...
+
+    @app.post('/users')
+    async def create_user(request):
+        # ...
+
+    for route in app.get_routes():
+        print(f"{route['methods']} {route['path']} -> {route['handler']}")
+        if route['is_dynamic']:
+            print(f"  Dynamic params: {route['dynamic_params']}")
+
+The output of the above example would be::
+
+    ['GET'] /users/<int:id> -> get_user
+      Dynamic params: ['id']
+    ['POST'] /users -> create_user
+
+Each route dictionary contains the following keys:
+
+- ``methods``: a list of HTTP methods handled by the route
+- ``path``: the full URL pattern string
+- ``handler``: the name of the handler function
+- ``is_dynamic``: ``True`` if the route has dynamic path segments
+- ``url_prefix``: the URL prefix if the route comes from a mounted sub-application
+- ``subapp``: the sub-application instance, or ``None``
+- ``dynamic_params``: a list of names of dynamic path segments
+- ``warnings``: a list of warning messages for potentially problematic configurations
+
+The ``print_routes()`` method provides a quick way to display all routes in
+a formatted table::
+
+    app.print_routes()
+
+This produces output like::
+
+    Methods   Path                Handler       Flags
+    --------  ------------------  ------------  ---------------
+    GET       /users/<int:id>     get_user      dynamic
+    POST      /users              create_user   -
+
+When sub-applications are mounted, the full path including the prefix is shown::
+
+    api = Microdot()
+
+    @api.get('/items')
+    async def list_items(request):
+        # ...
+
+    app.mount(api, url_prefix='/api/v1')
+    app.print_routes()
+
+Output::
+
+    Methods   Path              Handler     Flags
+    --------  ----------------  ----------  ----------------
+    GET       /api/v1/items     list_items  prefix:/api/v1
+
+The route inspection methods also detect and warn about duplicate route
+registrations. If the same HTTP method and path pattern are registered more
+than once, a warning is included in the route information and displayed in
+the printed output. This helps catch configuration errors early during
+development.
+
 Shutting Down the Server
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
