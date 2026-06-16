@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Microdot Pub/Sub Example</title>
+    <meta charset="UTF-8">
+    <style>
+      body { font-family: sans-serif; max-width: 600px; margin: 40px auto; }
+      #log { border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: auto;
+             background: #f9f9f9; margin-bottom: 10px; font-family: monospace; }
+      .msg { margin: 2px 0; }
+      .sys { color: #888; }
+      .in  { color: #0066cc; }
+      .out { color: #cc3300; }
+      form { display: flex; gap: 8px; }
+      input[type=text] { flex: 1; padding: 6px; }
+      button { padding: 6px 16px; }
+    </style>
+  </head>
+  <body>
+    <h1>Microdot Pub/Sub</h1>
+
+    <label for="channel">Channel:</label>
+    <input type="text" id="channel" value="general" style="width: 120px;">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+
+    <h3>Messages</h3>
+    <div id="log"></div>
+
+    <form id="publish-form">
+      <input type="text" id="message" placeholder="Message to publish..." disabled>
+      <button type="submit" id="send" disabled>Send</button>
+    </form>
+
+    <script>
+      const logEl = document.getElementById('log');
+      const channelInput = document.getElementById('channel');
+      const connectBtn = document.getElementById('connect');
+      const disconnectBtn = document.getElementById('disconnect');
+      const msgInput = document.getElementById('message');
+      const sendBtn = document.getElementById('send');
+      const publishForm = document.getElementById('publish-form');
+
+      let socket = null;
+
+      const log = (text, cls) => {
+        const div = document.createElement('div');
+        div.className = 'msg ' + (cls || '');
+        div.textContent = text;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      const connect = () => {
+        const channel = channelInput.value.trim() || 'general';
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        socket = new WebSocket(`${proto}//${location.host}/ws/${channel}`);
+
+        socket.addEventListener('open', () => {
+          log(`Connected to channel: ${channel}`, 'sys');
+          connectBtn.disabled = true;
+          disconnectBtn.disabled = false;
+          msgInput.disabled = false;
+          sendBtn.disabled = false;
+        });
+
+        socket.addEventListener('message', ev => {
+          try {
+            const msg = JSON.parse(ev.data);
+            log(`[${msg.channel}] ${JSON.stringify(msg.message)}`, 'in');
+          } catch(e) {
+            log('<<< ' + ev.data, 'in');
+          }
+        });
+
+        socket.addEventListener('close', () => {
+          log('Disconnected', 'sys');
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          msgInput.disabled = true;
+          sendBtn.disabled = true;
+          socket = null;
+        });
+      };
+
+      const disconnect = () => {
+        if (socket) socket.close();
+      };
+
+      const publish = async (text) => {
+        const channel = channelInput.value.trim() || 'general';
+        const res = await fetch(`/publish/${channel}`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({text: text})
+        });
+        const data = await res.json();
+        log(`>>> [${channel}] ${text}  (delivered to ${data.delivered})`, 'out');
+      };
+
+      connectBtn.addEventListener('click', connect);
+      disconnectBtn.addEventListener('click', disconnect);
+      publishForm.addEventListener('submit', ev => {
+        ev.preventDefault();
+        const text = msgInput.value.trim();
+        if (text) {
+          publish(text);
+          msgInput.value = '';
+        }
+      });
+    </script>
+  </body>
+</html>
